@@ -11,109 +11,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip and Replace Broken File Completely
+      - name: Unzip and Setup Project
         run: |
           unzip -o SmartIDM.zip
-          cp -r SmartIDM/* .
+          if [ -d "SmartIDM" ]; then
+            cp -r SmartIDM/* .
+          fi
           
-          # 1. إنشاء أيقونة التطبيق إذا كانت ناقصة
+          # التأكد من وجود مجلد الأيقونات لتجنب أي خطأ
+          mkdir -p app/src/main/res/drawable
           mkdir -p app/src/main/res/mipmap-anydpi-v26
+          
           if [ ! -f app/src/main/res/drawable/ic_launcher_background.xml ]; then
-            cat << 'EOF' > app/src/main/res/drawable/ic_launcher_background.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp"
-              android:height="108dp"
-              android:viewportWidth="108"
-              android:viewportHeight="108">
-              <path android:fillColor="#1E88E5" android:pathData="M0,0h108v108h-108z"/>
-          </vector>
-          EOF
+            echo '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108"><path android:fillColor="#1E88E5" android:pathData="M0,0h108v108h-108z"/></vector>' > app/src/main/res/drawable/ic_launcher_background.xml
           fi
 
-          if [ ! -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml ]; then
-            cat << 'EOF' > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
-          <?xml version="1.0" encoding="utf-8"?>
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@drawable/ic_launcher_background"/>
-              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
-          </adaptive-icon>
-          EOF
-            cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
-          fi
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-          # 2. استبدال ملف VideoExtractorEngine.kt بالكامل بنسخة سليمة 100%
-          cat << 'EOF' > app/src/main/java/com/smartidm/downloader/engine/VideoExtractorEngine.kt
-          package com.smartidm.downloader.engine
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
-          import com.smartidm.downloader.model.ExtractedMedia
-          import com.smartidm.downloader.model.VideoStreamOption
-          import kotlinx.coroutines.Dispatchers
-          import kotlinx.coroutines.withContext
-          import okhttp3.OkHttpClient
-          import okhttp3.Request
-          import java.net.URI
-          import java.util.concurrent.TimeUnit
+      - name: Build Debug APK
+        run: gradle assembleDebug
 
-          class VideoExtractorEngine {
-
-              private val httpClient = OkHttpClient.Builder()
-                  .followRedirects(true)
-                  .followSslRedirects(true)
-                  .connectTimeout(15, TimeUnit.SECONDS)
-                  .readTimeout(20, TimeUnit.SECONDS)
-                  .build()
-
-              companion object {
-                  private const val DESKTOP_UA =
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-              }
-
-              suspend fun extractFromUrl(rawInput: String): Result<ExtractedMedia> = withContext(Dispatchers.IO) {
-                  runCatching {
-                      val cleanUrl = extractFirstUrl(rawInput)
-                          ?: throw IllegalArgumentException("الرجاء إدخال رابط صحيح يبدأ بـ http أو https")
-
-                      if (isDirectMediaLink(cleanUrl)) {
-                          val ext = cleanUrl.substringBefore("?").substringAfterLast(".", "mp4").uppercase()
-                          val isHls = ext.equals("M3U8", ignoreCase = true)
-                          return@runCatching ExtractedMedia(
-                              title = guessFileNameFromUrl(cleanUrl),
-                              sourceUrl = cleanUrl,
-                              platform = extractHostName(cleanUrl),
-                              thumbnailUrl = null,
-                              streams = listOf(
-                                  VideoStreamOption(
-                                      qualityLabel = if (isHls) "بث مباشر HLS (M3U8)" else "ملف مباشر ($ext)",
-                                      format = ext,
-                                      url = cleanUrl,
-                                      isDirectMp4 = !isHls,
-                                      isM3u8 = isHls
-                                  )
-                              )
-                          )
-                      }
-
-                      extractGenericVideoPage(cleanUrl)
-                          ?: throw IllegalStateException("تعذر استخراج رابط مباشر، جرب فتح الرابط من المتصفح المدمج بالتطبيق")
-                  }
-              }
-
-              private fun extractGenericVideoPage(url: String): ExtractedMedia? {
-                  val html = fetchHtml(url, DESKTOP_UA) ?: return null
-                  val title = Regex("<title[^>]*>(.*?)</title>", RegexOption.IGNORE_CASE)
-                      .find(html)?.groupValues?.get(1)?.trim() ?: "Video"
-                  val thumb = Regex("property=[\"']og:image[\"']\\s+content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                      .find(html)?.groupValues?.get(1)
-
-                  val streams = mutableListOf<VideoStreamOption>()
-                  val ogVideo = Regex("property=[\"']og:video(?::url|:secure_url)?[\"']\\s+content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
-                      .find(html)?.groupValues?.get(1)
-
-                  if (!ogVideo.isNullOrBlank() && ogVideo.startsWith("http")) {
-                      streams.add(VideoStreamOption("Direct Video", "MP4", ogVideo, isDirectMp4 = true))
-                  }
-
-                  Regex("https?://[^\"'\\s<>]+\\.(?:mp4|m3u8)(?:\\?[^\"'\\s<>]*)?", RegexOption.IGNORE_CASE)
-                      .findAll(html)
-                      .map { it.value
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartIDM-APK
+          path: app/build/outputs/apk/debug/*.apk
