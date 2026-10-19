@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip and Fix Code Errors
+      - name: Unzip and Fix All Code Errors
         run: |
           unzip -o SmartIDM.zip
           cp -r SmartIDM/* .
@@ -42,19 +42,22 @@ jobs:
             cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
           fi
 
-          # 2. إصلاح الأخطاء البرمجية في ملف VideoExtractorEngine.kt تلقائياً
+          # 2. إصلاح ملف VideoExtractorEngine.kt بالكامل
           python3 - << 'PYEOF'
+          import re
           p = "app/src/main/java/com/smartidm/downloader/engine/VideoExtractorEngine.kt"
           with open(p, "r", encoding="utf-8") as f:
               code = f.read()
 
-          # إصلاح خطأ YoutubeDLRequest و addOption في السطور 60-65
-          code = code.replace(
-              "val request = YoutubeDLRequest(cleanUrl).apply {\n                addOption(\"--no-playlist\")\n                addOption(\"--socket-timeout\", \"15\")\n            }",
-              "val request = YoutubeDLRequest(cleanUrl)\n            request.addOption(\"--no-playlist\")\n            request.addOption(\"--socket-timeout\", \"15\")"
+          # استبدال جزء YoutubeDLRequest بالكامل باستدعاء مباشر متوافق مع المكتبة
+          code = re.sub(
+              r'val request = YoutubeDLRequest\(cleanUrl\).*?val info = YoutubeDL\.getInstance\(\)\.getInfo\(request\)',
+              'val info = YoutubeDL.getInstance().getInfo(cleanUrl)',
+              code,
+              flags=re.DOTALL
           )
 
-          # إصلاح الأقواس وعلامات التنصيص في نهاية الملف (السطور 390+)
+          # إصلاح دالة extractGenericVideoPage في نهاية الملف
           bad_part_start = code.find("private fun extractGenericVideoPage")
           if bad_part_start != -1:
               clean_function = '''private fun extractGenericVideoPage(url: String): ExtractedMedia? {
