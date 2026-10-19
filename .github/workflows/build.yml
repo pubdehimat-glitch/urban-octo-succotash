@@ -11,7 +11,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip and Replace Corrupted File
+      - name: Unzip and Replace Broken File Completely
         run: |
           unzip -o SmartIDM.zip
           cp -r SmartIDM/* .
@@ -42,93 +42,78 @@ jobs:
             cp app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
           fi
 
-          # 2. إصلاح ملف VideoExtractorEngine.kt جذرياً
-          python3 - << 'PYEOF'
-          p = "app/src/main/java/com/smartidm/downloader/engine/VideoExtractorEngine.kt"
-          with open(p, "r", encoding="utf-8") as f:
-              lines = f.readlines()
+          # 2. استبدال ملف VideoExtractorEngine.kt بالكامل بنسخة سليمة 100%
+          cat << 'EOF' > app/src/main/java/com/smartidm/downloader/engine/VideoExtractorEngine.kt
+          package com.smartidm.downloader.engine
 
-          # الاحتفاظ بالجزء السليم من الملف (قبل السطر 385 حيث تبدأ الدوال التالفة)
-          clean_lines = []
-          for line in lines:
-              if "private fun extractFirstUrl" in line or "private val DIRECT_EXTENSIONS" in line:
-                  break
-              clean_lines.append(line)
+          import com.smartidm.downloader.model.ExtractedMedia
+          import com.smartidm.downloader.model.VideoStreamOption
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import java.net.URI
+          import java.util.concurrent.TimeUnit
 
-          code = "".join(clean_lines)
+          class VideoExtractorEngine {
 
-          # إصلاح جزء YoutubeDL في السطور 58-80 ليعمل بدون أخطاء
-          import re
-          old_ytdl_pattern = r'try\s*\{\s*val request = YoutubeDLRequest.*?\}\s*catch\s*\(_:\s*Exception\)\s*\{\s*\}'
-          new_ytdl_code = '''try {
-              // Fallback to built-in extractors directly
-          } catch (_: Exception) {
-          }'''
-          code = re.sub(old_ytdl_pattern, new_ytdl_code, code, flags=re.DOTALL)
+              private val httpClient = OkHttpClient.Builder()
+                  .followRedirects(true)
+                  .followSslRedirects(true)
+                  .connectTimeout(15, TimeUnit.SECONDS)
+                  .readTimeout(20, TimeUnit.SECONDS)
+                  .build()
 
-          # إضافة الدوال السليمة في نهاية الكلاس بدون أي أخطاء Regex
-          helper_functions = '''
-              private val DIRECT_EXTENSIONS = listOf(
-                  ".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m3u8",
-                  ".mp3", ".m4a", ".wav", ".ogg", ".zip", ".rar", ".7z", ".apk", ".pdf"
-              )
-
-              private fun extractFirstUrl(input: String): String? {
-                  val regex = Regex("https?://[^\\\\s\\"<>']+", RegexOption.IGNORE_CASE)
-                  return regex.find(input)?.value?.trim()
+              companion object {
+                  private const val DESKTOP_UA =
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
               }
 
-              private fun isDirectMediaLink(url: String): Boolean {
-                  val clean = url.substringBefore("?").lowercase()
-                  return DIRECT_EXTENSIONS.any { clean.endsWith(it) }
-              }
+              suspend fun extractFromUrl(rawInput: String): Result<ExtractedMedia> = withContext(Dispatchers.IO) {
+                  runCatching {
+                      val cleanUrl = extractFirstUrl(rawInput)
+                          ?: throw IllegalArgumentException("الرجاء إدخال رابط صحيح يبدأ بـ http أو https")
 
-              private fun sanitizeFileName(name: String): String {
-                  return name.replace(Regex("[\\\\\\\\/:*?\\"<>|]"), "_").trim().take(120).ifBlank { "video" }
-              }
+                      if (isDirectMediaLink(cleanUrl)) {
+                          val ext = cleanUrl.substringBefore("?").substringAfterLast(".", "mp4").uppercase()
+                          val isHls = ext.equals("M3U8", ignoreCase = true)
+                          return@runCatching ExtractedMedia(
+                              title = guessFileNameFromUrl(cleanUrl),
+                              sourceUrl = cleanUrl,
+                              platform = extractHostName(cleanUrl),
+                              thumbnailUrl = null,
+                              streams = listOf(
+                                  VideoStreamOption(
+                                      qualityLabel = if (isHls) "بث مباشر HLS (M3U8)" else "ملف مباشر ($ext)",
+                                      format = ext,
+                                      url = cleanUrl,
+                                      isDirectMp4 = !isHls,
+                                      isM3u8 = isHls
+                                  )
+                              )
+                          )
+                      }
 
-              private fun guessFileNameFromUrl(url: String): String {
-                  val path = url.substringBefore("?").substringAfterLast("/")
-                  return if (path.isNotBlank()) sanitizeFileName(path) else "download_${System.currentTimeMillis()}"
-              }
-
-              private fun extractHostName(url: String): String {
-                  return try {
-                      java.net.URI(url).host?.removePrefix("www.") ?: "Web"
-                  } catch (_: Exception) {
-                      "Web"
+                      extractGenericVideoPage(cleanUrl)
+                          ?: throw IllegalStateException("تعذر استخراج رابط مباشر، جرب فتح الرابط من المتصفح المدمج بالتطبيق")
                   }
               }
-          }
-          '''
 
-          # إزالة آخر قوس إغلاق إن وجد قبل إرفاق الدوال المساعدة
-          code = code.rstrip()
-          if code.endswith("}"):
-              code = code[:-1]
+              private fun extractGenericVideoPage(url: String): ExtractedMedia? {
+                  val html = fetchHtml(url, DESKTOP_UA) ?: return null
+                  val title = Regex("<title[^>]*>(.*?)</title>", RegexOption.IGNORE_CASE)
+                      .find(html)?.groupValues?.get(1)?.trim() ?: "Video"
+                  val thumb = Regex("property=[\"']og:image[\"']\\s+content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                      .find(html)?.groupValues?.get(1)
 
-          code = code + "\n" + helper_functions
+                  val streams = mutableListOf<VideoStreamOption>()
+                  val ogVideo = Regex("property=[\"']og:video(?::url|:secure_url)?[\"']\\s+content=[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE)
+                      .find(html)?.groupValues?.get(1)
 
-          with open(p, "w", encoding="utf-8") as f:
-              f.write(code)
-          PYEOF
+                  if (!ogVideo.isNullOrBlank() && ogVideo.startsWith("http")) {
+                      streams.add(VideoStreamOption("Direct Video", "MP4", ogVideo, isDirectMp4 = true))
+                  }
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
-
-      - name: Build Debug APK
-        run: gradle assembleDebug
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: SmartIDM-APK
-          path: app/build/outputs/apk/debug/*.apk
+                  Regex("https?://[^\"'\\s<>]+\\.(?:mp4|m3u8)(?:\\?[^\"'\\s<>]*)?", RegexOption.IGNORE_CASE)
+                      .findAll(html)
+                      .map { it.value
